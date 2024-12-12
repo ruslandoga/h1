@@ -39,11 +39,11 @@ $ wrk -d 10 -t 10 -c 10 http://localhost:8000
 Running 10s test @ http://localhost:8000
   10 threads and 10 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   133.55us   43.60us   1.92ms   77.89%
-    Req/Sec     7.36k   464.48     9.37k    77.62%
-  739448 requests in 10.10s, 102.25MB read
-Requests/sec:  73216.09
-Transfer/sec:     10.12MB 
+    Latency   102.05us   31.13us   1.10ms   73.74%
+    Req/Sec     9.55k   578.27    10.38k    88.02%
+  959342 requests in 10.10s, 132.66MB read
+Requests/sec:  94989.51
+Transfer/sec:     13.14MB
 ```
 
 ```elixir

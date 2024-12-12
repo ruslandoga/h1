@@ -123,7 +123,7 @@ defmodule Hx do
     :content_length,
     :connection,
     :version,
-    :req_headers
+    :headers
   ])
 
   defp keepalive(socket, buffer, timeouts, plug) do
@@ -134,11 +134,10 @@ defmodule Hx do
   end
 
   defp handle_request(socket, buffer, timeouts, plug) do
-    timeouts(request: request_timeout, headers: headers_timeout) = timeouts
+    timeouts(request: request_timeout, headers: _headers_timeout) = timeouts
 
-    {method, raw_path, version, buffer, req} = recv_request(socket, buffer, request_timeout)
-    {req_headers, buffer, host, req} = recv_headers(socket, version, buffer, headers_timeout, req)
-    conn = conn(socket, method, raw_path, req_headers, buffer, host, req)
+    {method, url, version, headers, buffer} = recv_request(socket, buffer, request_timeout)
+    conn = conn(socket, method, url, version, headers, buffer)
 
     %{adapter: {_, req}} = plug.call(conn, _todo_opts = [])
 
@@ -151,11 +150,24 @@ defmodule Hx do
     req
   end
 
-  defp recv_request(socket, buffer, timeout) when byte_size(buffer) <= 1_000 do
-    # TODO PicoHTTPParser.parse_request(buffer)
-    case :erlang.decode_packet(:http_bin, buffer, []) do
-      {:more, _} ->
-        case :socket.recv(socket, 0, timeout) |> IO.inspect(label: "recv_request") do
+  defp recv_request(socket, <<>>, timeout) do
+    case :socket.recv(socket, 0, timeout) do
+      {:ok, data} ->
+        recv_request(socket, data, timeout)
+
+      {:error, _reason} ->
+        :socket.close(socket)
+        exit(:normal)
+    end
+  end
+
+  defp recv_request(socket, buffer, timeout) when byte_size(buffer) <= 2_000 do
+    case PicoHTTPParser.parse_request(buffer) do
+      {_method, _url, _v, _headers, _rest} = req ->
+        req
+
+      _pret ->
+        case :socket.recv(socket, 0, timeout) do
           {:ok, data} ->
             recv_request(socket, buffer <> data, timeout)
 
@@ -163,18 +175,6 @@ defmodule Hx do
             :socket.close(socket)
             exit(:normal)
         end
-
-      {:ok, {:http_request, method, raw_path, version}, buffer} ->
-        {method, raw_path, version, buffer, req(version: version)}
-
-      {:ok, {:http_error, _}, _} ->
-        send_bad_request(socket)
-        :socket.close(socket)
-        exit(:normal)
-
-      {:ok, {:http_response, _, _, _}, _} ->
-        :socket.close(socket)
-        exit(:normal)
     end
   end
 
@@ -188,156 +188,30 @@ defmodule Hx do
     :socket.send(socket, "HTTP/1.1 400 Bad Request\r\ncontent-length: 11\r\n\r\nBad Request")
   end
 
-  defp recv_headers(socket, {1, _}, buffer, timeout, req) do
-    recv_headers(socket, buffer, _headers = [], _count = 0, timeout, _host = nil, req)
-  end
+  defp conn(socket, method, url, version, headers, buffer) do
+    {host, transfer_encoding, content_length, connection, headers} = process_headers(headers)
 
-  defp recv_headers(socket, {0, 9}, _buffer, _timeout, _req) do
-    send_bad_request(socket)
-    :socket.close(socket)
-    exit(:normal)
-  end
-
-  defp recv_headers(socket, buffer, headers, count, timeout, host, req)
-       when byte_size(buffer) <= 1_000 and count < 100 do
-    case :erlang.decode_packet(:httph_bin, buffer, []) do
-      {:ok, {:http_header, _, k, k_bin, v}, buffer} ->
-        case k do
-          :"Transfer-Encoding" ->
-            v = String.downcase(v)
-            req = req(req, transfer_encoding: v)
-            headers = [{"transfer-encoding", v} | headers]
-            recv_headers(socket, buffer, headers, count + 1, timeout, host, req)
-
-          :Connection ->
-            v = String.downcase(v)
-            req = req(req, connection: v)
-            headers = [{"connection", v} | headers]
-            recv_headers(socket, buffer, headers, count + 1, timeout, host, req)
-
-          :Host ->
-            headers = [{"host", v} | headers]
-            recv_headers(socket, buffer, headers, count + 1, timeout, v, req)
-
-          :"Content-Length" ->
-            i = String.to_integer(v)
-            req = req(req, content_length: i)
-            headers = [{"content-length", v} | headers]
-            recv_headers(socket, buffer, headers, count + 1, timeout, host, req)
-
-          _ ->
-            headers = [{header(k, k_bin), v} | headers]
-            recv_headers(socket, buffer, headers, count + 1, timeout, host, req)
-        end
-
-      {:ok, :http_eoh, buffer} ->
-        {headers, buffer, host, req}
-
-      {:ok, {:http_error, _}, buffer} ->
-        recv_headers(socket, buffer, headers, count, timeout, host, req)
-
-      {:more, _} ->
-        case :socket.recv(socket, timeout) do
-          {:ok, data} ->
-            recv_headers(socket, buffer <> data, headers, count, timeout, host, req)
-
-          {:error, _reason} ->
-            :socket.close(socket)
-            exit(:normal)
-        end
-    end
-  end
-
-  defp recv_headers(socket, _buffer, _headers, _count, _timeout, _host, _req) do
-    send_bad_request(socket)
-    :socket.close(socket)
-    exit(:normal)
-  end
-
-  headers = [
-    :"Cache-Control",
-    # :Connection,
-    :Date,
-    :Pragma,
-    # :"Transfer-Encoding",
-    :Upgrade,
-    :Via,
-    :Accept,
-    :"Accept-Charset",
-    :"Accept-Encoding",
-    :"Accept-Language",
-    :Authorization,
-    :From,
-    # :Host,
-    :"If-Modified-Since",
-    :"If-Match",
-    :"If-None-Match",
-    :"If-Range",
-    :"If-Unmodified-Since",
-    :"Max-Forwards",
-    :"Proxy-Authorization",
-    :Range,
-    :Referer,
-    :"User-Agent",
-    :Age,
-    :Location,
-    :"Proxy-Authenticate",
-    :Public,
-    :"Retry-After",
-    :Server,
-    :Vary,
-    :Warning,
-    :"Www-Authenticate",
-    :Allow,
-    :"Content-Base",
-    :"Content-Encoding",
-    :"Content-Language",
-    # :"Content-Length",
-    :"Content-Location",
-    :"Content-Md5",
-    :"Content-Range",
-    :"Content-Type",
-    :Etag,
-    :Expires,
-    :"Last-Modified",
-    :"Accept-Ranges",
-    :"Set-Cookie",
-    :"Set-Cookie2",
-    :"X-Forwarded-For",
-    :Cookie,
-    :"Keep-Alive",
-    :"Proxy-Connection"
-  ]
-
-  for h <- headers do
-    defp header(unquote(h), _), do: unquote(String.downcase(to_string(h)))
-  end
-
-  defp header(_, h), do: String.downcase(h)
-
-  defp conn(socket, method, raw_path, req_headers, buffer, host, req) do
-    path =
-      case raw_path do
-        {:abs_path, path} ->
-          path
-
-        {:absoluteURI, _scheme, _host, _port, path} ->
-          path
-
-        _other ->
-          send_bad_request(socket)
-          exit(:normal)
-      end
-
+    # TODO separate url into host and path
+    # use https://github.com/ada-url/ada
     {path, path_info, query_string} =
-      case :binary.split(path, "?") do
+      case :binary.split(url, "?") do
         [path] -> {path, split_path(path), ""}
         [path, query_string] -> {path, split_path(path), query_string}
       end
 
     # TODO https://www.erlang.org/doc/man/inet.html#type-returned_non_ip_address
     {:ok, %{addr: remote_ip, port: port}} = :socket.peername(socket)
-    req = req(req, socket: socket, buffer: buffer, req_headers: req_headers)
+
+    req =
+      req(
+        socket: socket,
+        buffer: buffer,
+        transfer_encoding: transfer_encoding,
+        content_length: content_length,
+        connection: connection,
+        version: version,
+        headers: headers
+      )
 
     %Plug.Conn{
       adapter: {__MODULE__, req},
@@ -345,13 +219,51 @@ defmodule Hx do
       port: port,
       remote_ip: remote_ip,
       query_string: query_string,
-      req_headers: req_headers,
+      req_headers: headers,
       request_path: path,
       scheme: :http,
-      method: Atom.to_string(method),
+      method: method,
       path_info: path_info,
       owner: self()
     }
+  end
+
+  defp process_headers(headers) do
+    process_headers(
+      headers,
+      _host = nil,
+      _transfer_encoding = nil,
+      _content_length = 0,
+      _connection = nil,
+      []
+    )
+  end
+
+  defp process_headers([{k, v} | rest], host, transfer_encoding, content_length, connection, acc) do
+    k = String.downcase(k)
+    acc = [{k, v} | acc]
+
+    case k do
+      "host" ->
+        process_headers(rest, v, transfer_encoding, content_length, connection, acc)
+
+      "transfer-encoding" ->
+        process_headers(rest, host, v, content_length, connection, acc)
+
+      "content-length" ->
+        process_headers(rest, host, transfer_encoding, String.to_integer(v), connection, acc)
+
+      "connection" ->
+        process_headers(rest, host, transfer_encoding, content_length, v, acc)
+
+      _ ->
+        process_headers(rest, host, transfer_encoding, content_length, connection, acc)
+    end
+  end
+
+  defp process_headers([], host, transfer_encoding, content_length, connection, acc) do
+    # TODO :lists.reverse?
+    {host, transfer_encoding, content_length, connection, acc}
   end
 
   defp split_path(path) do
