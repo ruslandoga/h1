@@ -9,20 +9,23 @@ defmodule HxTest do
     :ok
   end
 
-  defmodule App do
-    import Plug.Conn
-
-    def init(opts), do: opts
-
-    def call(conn, _opts) do
-      conn
-      |> put_resp_content_type("text/plain")
-      |> send_resp(200, "Hello, world!")
+  defmodule HelloWorld do
+    def call("GET", _path, _headers, req) do
+      # _body = Hx.read_body(req)
+      Hx.send_resp(
+        req,
+        _status = 200,
+        _headers = [
+          {"cache-control", "max-age=0, private, must-revalidate"},
+          {"content-type", "text/plain; charset=utf-8"}
+        ],
+        _body = "Hello, world!"
+      )
     end
   end
 
   test "GET /" do
-    {:ok, hx} = Hx.start_link(port: 0, plug: App)
+    {:ok, hx} = Hx.start_link(port: 0, handler: HelloWorld)
     {:ok, %{port: port}} = Hx.sockname(hx)
 
     assert get("http://localhost:#{port}/") == %Finch.Response{

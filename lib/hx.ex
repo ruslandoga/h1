@@ -2,10 +2,9 @@ defmodule Hx do
   @moduledoc "A minimal HTTP/1 server."
   use GenServer
   require Logger
-
   require Record
   Record.defrecordp(:timeouts, [:accept, :request, :headers])
-  Record.defrecordp(:state, [:socket, :acceptors, :timeouts, :plug])
+  Record.defrecordp(:state, [:socket, :acceptors, :timeouts, :handler])
 
   def start_link(opts) do
     {genserver_opts, opts} = Keyword.split(opts, [:name, :debug])
@@ -26,31 +25,31 @@ defmodule Hx do
   def init(opts) do
     Process.flag(:trap_exit, true)
 
-    plug = Keyword.fetch!(opts, :plug)
+    handler = Keyword.fetch!(opts, :handler)
     addr = Keyword.get(opts, :addr, {127, 0, 0, 1})
     port = Keyword.get(opts, :port, 0)
+    backlog = Keyword.get(opts, :backlog, 1024)
     min_acceptors = Keyword.get(opts, :acceptors, 100)
     timeouts = Keyword.get(opts, :timeouts, [])
 
     timeouts =
       timeouts(
         accept: Keyword.get(timeouts, :accept, :timer.seconds(10)),
-        request: Keyword.get(timeouts, :request, :timer.seconds(60)),
+        request: Keyword.get(timeouts, :request, :timer.seconds(10)),
         headers: Keyword.get(timeouts, :headers, :timer.seconds(10))
       )
 
-    {:ok, socket} = :socket.open(:inet, :stream, :tcp)
-    :ok = :socket.setopt(socket, {:socket, :reuseaddr}, true)
-    :ok = :socket.setopt(socket, {:socket, :linger}, %{onoff: true, linger: 30})
-    :ok = :socket.setopt(socket, {:tcp, :nodelay}, true)
-    :ok = :socket.bind(socket, %{family: :inet, port: port, addr: addr})
-    :ok = :socket.listen(socket, opts[:backlog] || 1024)
-
-    acceptors = :ets.new(:acceptors, [:private, :set])
-    state = state(socket: socket, acceptors: acceptors, timeouts: timeouts, plug: plug)
-    for _ <- 1..min_acceptors, do: start_acceptor(state)
-
-    {:ok, state}
+    with {:ok, socket} <- :socket.open(:inet, :stream, :tcp),
+         :ok <- :socket.setopt(socket, {:socket, :reuseaddr}, true),
+         :ok <- :socket.setopt(socket, {:socket, :linger}, %{onoff: true, linger: 30}),
+         :ok <- :socket.setopt(socket, {:tcp, :nodelay}, true),
+         :ok <- :socket.bind(socket, %{family: :inet, port: port, addr: addr}),
+         :ok <- :socket.listen(socket, backlog) do
+      acceptors = :ets.new(:acceptors, [:private, :set])
+      state = state(socket: socket, acceptors: acceptors, timeouts: timeouts, handler: handler)
+      for _ <- 1..min_acceptors, do: start_acceptor(state)
+      {:ok, state}
+    end
   end
 
   @impl true
@@ -69,9 +68,9 @@ defmodule Hx do
   end
 
   @impl true
-  def handle_info({:EXIT, _pid, {:error, :emfile}}, state) do
-    Logger.error("Hx could not accept connection: too many open files")
-    {:stop, :emfile, state}
+  def handle_info({:EXIT, _pid, {:error, :emfile = reason}}, state) do
+    Logger.error("Hx could not accept connection: too many open files. Shutting down.")
+    {:stop, reason, state}
   end
 
   def handle_info({:EXIT, pid, :normal}, state) do
@@ -80,7 +79,8 @@ defmodule Hx do
   end
 
   def handle_info({:EXIT, pid, reason}, state) do
-    Logger.error("Hx Acceptor (pid #{inspect(pid)}) crashed:\n" <> Exception.format_exit(reason))
+    # TODO
+    Logger.error("Hx acceptor (pid #{inspect(pid)}) crashed:\n" <> Exception.format_exit(reason))
     remove_acceptor(state, pid)
     {:noreply, state}
   end
@@ -90,23 +90,23 @@ defmodule Hx do
   end
 
   defp start_acceptor(state) do
-    state(socket: socket, acceptors: acceptors, timeouts: timeouts, plug: plug) = state
-    pid = :proc_lib.spawn_link(__MODULE__, :accept, [self(), socket, timeouts, plug])
+    state(socket: socket, acceptors: acceptors, timeouts: timeouts, handler: handler) = state
+    pid = :proc_lib.spawn_link(__MODULE__, :accept, [self(), socket, timeouts, handler])
     :ets.insert(acceptors, {pid})
   end
 
   @doc false
-  def accept(parent, listen_socket, timeouts, plug) do
+  def accept(parent, listen_socket, timeouts, handler) do
     case :socket.accept(listen_socket, timeouts(timeouts, :accept)) do
       {:ok, socket} ->
         GenServer.cast(parent, :accepted)
-        keepalive(socket, _buffer = <<>>, timeouts, plug)
+        keepalive(socket, _buffer = <<>>, timeouts, handler)
 
       {:error, :timeout} ->
-        accept(parent, listen_socket, timeouts, plug)
+        accept(parent, listen_socket, timeouts, handler)
 
       {:error, :econnaborted} ->
-        accept(parent, listen_socket, timeouts, plug)
+        accept(parent, listen_socket, timeouts, handler)
 
       {:error, :closed} ->
         :ok
@@ -126,28 +126,42 @@ defmodule Hx do
     :headers
   ])
 
-  defp keepalive(socket, buffer, timeouts, plug) do
-    case handle_request(socket, buffer, timeouts, plug) do
+  defp keepalive(socket, buffer, timeouts, handler) do
+    case handle_request(socket, buffer, timeouts, handler) do
       req(connection: "close") -> :socket.close(socket)
-      req(buffer: buffer) -> keepalive(socket, buffer, timeouts, plug)
+      req(buffer: buffer) -> keepalive(socket, buffer, timeouts, handler)
     end
   end
 
-  defp handle_request(socket, buffer, timeouts, plug) do
-    timeouts(request: request_timeout, headers: _headers_timeout) = timeouts
+  defp handle_request(socket, buffer, timeouts, handler) do
+    timeouts(request: timeout) = timeouts
 
-    {method, url, version, headers, buffer} = recv_request(socket, buffer, request_timeout)
-    conn = conn(socket, method, url, version, headers, buffer)
+    {method, url, version, headers, buffer} = recv_request(socket, buffer, timeout)
+    {_host, transfer_encoding, content_length, connection, headers} = process_headers(headers)
 
-    %{adapter: {_, req}} = plug.call(conn, _todo_opts = [])
+    # TODO separate url into host and path
+    # use https://github.com/ada-url/ada
+    # {path, path_info, query_string} =
+    #   case :binary.split(url, "?") do
+    #     [path] -> {path, split_path(path), ""}
+    #     [path, query_string] -> {path, split_path(path), query_string}
+    #   end
 
-    receive do
-      {:plug_conn, :sent} -> :ok
-    after
-      0 -> :ok
-    end
+    # TODO https://www.erlang.org/doc/man/inet.html#type-returned_non_ip_address
+    # {:ok, %{addr: remote_ip, port: port}} = :socket.peername(socket)
 
-    req
+    req =
+      req(
+        socket: socket,
+        buffer: buffer,
+        transfer_encoding: transfer_encoding,
+        content_length: content_length,
+        connection: connection,
+        version: version,
+        headers: headers
+      )
+
+    handler.call(method, url, headers, req)
   end
 
   defp recv_request(socket, <<>>, timeout) do
@@ -188,46 +202,6 @@ defmodule Hx do
     :socket.send(socket, "HTTP/1.1 400 Bad Request\r\ncontent-length: 11\r\n\r\nBad Request")
   end
 
-  defp conn(socket, method, url, version, headers, buffer) do
-    {host, transfer_encoding, content_length, connection, headers} = process_headers(headers)
-
-    # TODO separate url into host and path
-    # use https://github.com/ada-url/ada
-    {path, path_info, query_string} =
-      case :binary.split(url, "?") do
-        [path] -> {path, split_path(path), ""}
-        [path, query_string] -> {path, split_path(path), query_string}
-      end
-
-    # TODO https://www.erlang.org/doc/man/inet.html#type-returned_non_ip_address
-    {:ok, %{addr: remote_ip, port: port}} = :socket.peername(socket)
-
-    req =
-      req(
-        socket: socket,
-        buffer: buffer,
-        transfer_encoding: transfer_encoding,
-        content_length: content_length,
-        connection: connection,
-        version: version,
-        headers: headers
-      )
-
-    %Plug.Conn{
-      adapter: {__MODULE__, req},
-      host: host,
-      port: port,
-      remote_ip: remote_ip,
-      query_string: query_string,
-      req_headers: headers,
-      request_path: path,
-      scheme: :http,
-      method: method,
-      path_info: path_info,
-      owner: self()
-    }
-  end
-
   defp process_headers(headers) do
     process_headers(
       headers,
@@ -266,50 +240,51 @@ defmodule Hx do
     {host, transfer_encoding, content_length, connection, acc}
   end
 
-  defp split_path(path) do
-    path |> :binary.split("/", [:global]) |> clean_segments()
-  end
+  # TODO URI.decode_query?
+  # defp split_path(path) do
+  #   path |> :binary.split("/", [:global]) |> clean_segments()
+  # end
 
-  @compile inline: [clean_segments: 1]
-  defp clean_segments(["" | rest]), do: clean_segments(rest)
-  defp clean_segments([segment | rest]), do: [segment | clean_segments(rest)]
-  defp clean_segments([] = done), do: done
+  # @compile inline: [clean_segments: 1]
+  # defp clean_segments(["" | rest]), do: clean_segments(rest)
+  # defp clean_segments([segment | rest]), do: [segment | clean_segments(rest)]
+  # defp clean_segments([] = done), do: done
 
-  @behaviour Plug.Conn.Adapter
-
-  @impl true
   def send_resp(req, status, headers, body) do
     req(socket: socket) = req
 
     response = [
       http_line(status),
-      encode_headers([ensure_content_length(headers, body) | headers]) | body
+      # TODO
+      encode_headers([ensure_content_length(headers, body) | headers])
+      | body
     ]
 
     :socket.send(socket, response)
 
+    # TODO
     case List.keyfind(headers, "connection", 0) do
-      {_, connection} -> {:ok, nil, req(req, connection: connection)}
-      nil -> {:ok, nil, req}
+      {_, connection} -> req(req, connection: connection)
+      nil -> req
     end
   end
 
-  @impl true
-  def send_file(_req, _status, _headers, _file, _offset, _length) do
-    raise "not implemented"
-  end
+  # @impl true
+  # def send_file(_req, _status, _headers, _file, _offset, _length) do
+  #   raise "not implemented"
+  # end
 
-  @impl true
-  def send_chunked(_req, _status, _headers) do
-    raise "not implemented"
-  end
+  # @impl true
+  # def send_chunked(_req, _status, _headers) do
+  #   raise "not implemented"
+  # end
 
-  @impl true
-  def chunk(_req, _body) do
-    {:error, :not_supported}
-  end
+  # @impl true
+  # def chunk(_req, _body) do
+  #   {:error, :not_supported}
+  # end
 
-  @impl true
+  # @impl true
   def read_req_body(req, opts) do
     req(
       socket: socket,
@@ -364,35 +339,35 @@ defmodule Hx do
   #   end
   # end
 
-  @impl true
-  def push(_req, _path, _headers) do
-    {:error, :not_supported}
-  end
+  # @impl true
+  # def push(_req, _path, _headers) do
+  #   {:error, :not_supported}
+  # end
 
-  @impl true
-  def inform(_req, _status, _headers) do
-    {:error, :not_supported}
-  end
+  # @impl true
+  # def inform(_req, _status, _headers) do
+  #   {:error, :not_supported}
+  # end
 
-  @impl true
-  def upgrade(_req, _protocol, _opts) do
-    {:error, :not_supported}
-  end
+  # @impl true
+  # def upgrade(_req, _protocol, _opts) do
+  #   {:error, :not_supported}
+  # end
 
-  @impl true
-  def get_peer_data(req(socket: socket)) do
-    {:ok, {address, port}} = :inet.peername(socket)
-    %{address: address, port: port, ssl_cert: nil}
-  end
+  # @impl true
+  # def get_peer_data(req(socket: socket)) do
+  #   {:ok, {address, port}} = :inet.peername(socket)
+  #   %{address: address, port: port, ssl_cert: nil}
+  # end
 
-  @impl true
-  def get_http_protocol(req(version: version)) do
-    case version do
-      {1, 1} -> :"HTTP/1.1"
-      {1, 0} -> :"HTTP/1"
-      {0, 9} -> :"HTTP/0.9"
-    end
-  end
+  # @impl true
+  # def get_http_protocol(req(version: version)) do
+  #   case version do
+  #     {1, 1} -> :"HTTP/1.1"
+  #     {1, 0} -> :"HTTP/1"
+  #     {0, 9} -> :"HTTP/0.9"
+  #   end
+  # end
 
   defp ensure_content_length(headers, body) do
     case List.keyfind(headers, "content-length", 0) do

@@ -1,0 +1,9 @@
+- Date headers
+- WebSocket
+- chunked requests
+- chunked responses
+- file serving
+- TLS
+- replace PicoHTTPParser with pure Elixir impl
+- URL parsing
+- submit to https://github.com/TechEmpower/FrameworkBenchmarks 
