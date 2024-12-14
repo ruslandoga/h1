@@ -5,7 +5,7 @@ defmodule Hx do
 
   require Record
   Record.defrecordp(:timeouts, [:accept, :request, :headers])
-  Record.defrecordp(:state, [:socket, :acceptors, :timeouts, :plug])
+  Record.defrecordp(:state, [:socket, :acceptors, :timeouts, :handler])
 
   def start_link(opts) do
     {genserver_opts, opts} = Keyword.split(opts, [:name, :debug])
@@ -26,7 +26,7 @@ defmodule Hx do
   def init(opts) do
     Process.flag(:trap_exit, true)
 
-    plug = Keyword.fetch!(opts, :plug)
+    handler = Keyword.fetch!(opts, :handler)
     addr = Keyword.get(opts, :addr, {127, 0, 0, 1})
     port = Keyword.get(opts, :port, 0)
     min_acceptors = Keyword.get(opts, :acceptors, 100)
@@ -47,7 +47,7 @@ defmodule Hx do
     :ok = :socket.listen(socket, opts[:backlog] || 1024)
 
     acceptors = :ets.new(:acceptors, [:private, :set])
-    state = state(socket: socket, acceptors: acceptors, timeouts: timeouts, plug: plug)
+    state = state(socket: socket, acceptors: acceptors, timeouts: timeouts, handler: handler)
     for _ <- 1..min_acceptors, do: start_acceptor(state)
 
     {:ok, state}
@@ -90,23 +90,23 @@ defmodule Hx do
   end
 
   defp start_acceptor(state) do
-    state(socket: socket, acceptors: acceptors, timeouts: timeouts, plug: plug) = state
-    pid = :proc_lib.spawn_link(__MODULE__, :accept, [self(), socket, timeouts, plug])
+    state(socket: socket, acceptors: acceptors, timeouts: timeouts, handler: handler) = state
+    pid = :proc_lib.spawn_link(__MODULE__, :accept, [self(), socket, timeouts, handler])
     :ets.insert(acceptors, {pid})
   end
 
   @doc false
-  def accept(parent, listen_socket, timeouts, plug) do
+  def accept(parent, listen_socket, timeouts, handler) do
     case :socket.accept(listen_socket, timeouts(timeouts, :accept)) do
       {:ok, socket} ->
         GenServer.cast(parent, :accepted)
-        keepalive(socket, _buffer = <<>>, timeouts, plug)
+        keepalive(socket, _buffer = <<>>, timeouts, handler)
 
       {:error, :timeout} ->
-        accept(parent, listen_socket, timeouts, plug)
+        accept(parent, listen_socket, timeouts, handler)
 
       {:error, :econnaborted} ->
-        accept(parent, listen_socket, timeouts, plug)
+        accept(parent, listen_socket, timeouts, handler)
 
       {:error, :closed} ->
         :ok
@@ -126,27 +126,43 @@ defmodule Hx do
     :headers
   ])
 
-  defp keepalive(socket, buffer, timeouts, plug) do
-    case handle_request(socket, buffer, timeouts, plug) do
+  defp keepalive(socket, buffer, timeouts, handler) do
+    case handle_request(socket, buffer, timeouts, handler) do
       req(connection: "close") -> :socket.close(socket)
-      req(buffer: buffer) -> keepalive(socket, buffer, timeouts, plug)
+      req(buffer: buffer) -> keepalive(socket, buffer, timeouts, handler)
     end
   end
 
-  defp handle_request(socket, buffer, timeouts, plug) do
+  defp handle_request(socket, buffer, timeouts, handler) do
     timeouts(request: request_timeout, headers: _headers_timeout) = timeouts
 
     {method, url, version, headers, buffer} = recv_request(socket, buffer, request_timeout)
-    conn = conn(socket, method, url, version, headers, buffer)
+    {host, transfer_encoding, content_length, connection, headers} = process_headers(headers)
 
-    %{adapter: {_, req}} = plug.call(conn, _todo_opts = [])
+    # TODO separate url into host and path
+    # use https://github.com/ada-url/ada
+    {path, path_info, query_string} =
+      case :binary.split(url, "?") do
+        [path] -> {path, split_path(path), ""}
+        [path, query_string] -> {path, split_path(path), query_string}
+      end
 
-    receive do
-      {:plug_conn, :sent} -> :ok
-    after
-      0 -> :ok
-    end
+    # TODO https://www.erlang.org/doc/man/inet.html#type-returned_non_ip_address
+    # {:ok, %{addr: remote_ip, port: port}} = :socket.peername(socket)
 
+    req =
+      req(
+        socket: socket,
+        buffer: buffer,
+        transfer_encoding: transfer_encoding,
+        content_length: content_length,
+        connection: connection,
+        version: version,
+        headers: headers
+      )
+
+    pipeline = handler.call(req, method, url, headers, req)
+    req = execute_pipeline(pipeline, req)
     req
   end
 
@@ -186,46 +202,6 @@ defmodule Hx do
 
   defp send_bad_request(socket) do
     :socket.send(socket, "HTTP/1.1 400 Bad Request\r\ncontent-length: 11\r\n\r\nBad Request")
-  end
-
-  defp conn(socket, method, url, version, headers, buffer) do
-    {host, transfer_encoding, content_length, connection, headers} = process_headers(headers)
-
-    # TODO separate url into host and path
-    # use https://github.com/ada-url/ada
-    {path, path_info, query_string} =
-      case :binary.split(url, "?") do
-        [path] -> {path, split_path(path), ""}
-        [path, query_string] -> {path, split_path(path), query_string}
-      end
-
-    # TODO https://www.erlang.org/doc/man/inet.html#type-returned_non_ip_address
-    {:ok, %{addr: remote_ip, port: port}} = :socket.peername(socket)
-
-    req =
-      req(
-        socket: socket,
-        buffer: buffer,
-        transfer_encoding: transfer_encoding,
-        content_length: content_length,
-        connection: connection,
-        version: version,
-        headers: headers
-      )
-
-    %Plug.Conn{
-      adapter: {__MODULE__, req},
-      host: host,
-      port: port,
-      remote_ip: remote_ip,
-      query_string: query_string,
-      req_headers: headers,
-      request_path: path,
-      scheme: :http,
-      method: method,
-      path_info: path_info,
-      owner: self()
-    }
   end
 
   defp process_headers(headers) do

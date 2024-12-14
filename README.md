@@ -12,9 +12,7 @@ defmodule HelloWorld do
     |> send_resp(200, "Hello, world!")
   end
 end
-```
 
-```elixir
 Plug.Cowboy.http(HelloWorld, [])
 ```
 
@@ -30,6 +28,7 @@ Requests/sec:  48617.36
 Transfer/sec:      9.18MB 
 ```
 
+
 ```elixir
 defmodule HelloWorld do
   import Plug.Conn
@@ -43,22 +42,6 @@ defmodule HelloWorld do
   end
 end
 
-Hx.start_link(port: 8000, plug: HelloWorld)
-```
-
-```console
-$ wrk -d 10 -t 10 -c 10 http://localhost:8000
-Running 10s test @ http://localhost:8000
-  10 threads and 10 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   102.05us   31.13us   1.10ms   73.74%
-    Req/Sec     9.55k   578.27    10.38k    88.02%
-  959342 requests in 10.10s, 132.66MB read
-Requests/sec:  94989.51
-Transfer/sec:     13.14MB
-```
-
-```elixir
 Bandit.start_link(plug: HelloWorld, port: 8000)
 ```
 
@@ -74,9 +57,25 @@ Requests/sec:  60844.28
 Transfer/sec:     11.90MB
 ```
 
+```elixir
+defmodule HelloWorld do
+  def call("GET", _path = [], _headers, _body, _req) do
+    _body = Hx.read_body(req)
+    Hx.send_resp(req, _status = 200, _headers = [{"content-type", "text/plain"}], _body = "Hello, world!")
+  end
+end
+
+Hx.start_link(port: 8000, handler: HelloWorld)
+```
+
+```console
+$ wrk -d 10 -t 10 -c 10 http://localhost:8000
+# TODO
+```
+
 ---
 
-Hm, maybe no PLug?
+Hm, maybe no Plug?
 
 ```elixir
 defmodule A do
