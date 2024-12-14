@@ -1,4 +1,4 @@
-Basic but fast HTTP/1.1 web server.
+Incomplete but fast HTTP/1.1 & WebSocket web server.
 
 ```elixir
 defmodule HelloWorld do
@@ -31,6 +31,18 @@ Transfer/sec:      9.18MB
 ```
 
 ```elixir
+defmodule HelloWorld do
+  import Plug.Conn
+
+  def init(opts), do: opts
+
+  def call(conn, _opts) do
+    conn
+    |> put_resp_content_type("text/plain")
+    |> send_resp(200, "Hello, world!")
+  end
+end
+
 Hx.start_link(port: 8000, plug: HelloWorld)
 ```
 
@@ -60,4 +72,36 @@ Running 10s test @ http://localhost:8000
   614518 requests in 10.10s, 120.14MB read
 Requests/sec:  60844.28
 Transfer/sec:     11.90MB
+```
+
+---
+
+Hm, maybe no PLug?
+
+```elixir
+defmodule A do
+  @already_sent {:plug_conn, :sent}
+  
+  def do_send_return(i) do
+    result = i + i
+    send(self(), @already_sent)
+
+    receive do
+      @already_sent -> :ok
+    after
+      0 -> :ok
+    end
+
+    result
+  end
+
+  def do_return(i) do
+    i + i
+  end
+end
+
+:timer.tc(fn -> Enum.each(1..10000, &A.do_return/1) end)
+# 115ms avg after three runs
+:timer.tc(fn -> Enum.each(1..10000, &A.do_send_return/1) end)
+# 2387ms avg after three runs
 ```
