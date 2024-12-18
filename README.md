@@ -1,5 +1,7 @@
 Incomplete but fast HTTP/1.1 & WebSocket web server.
 
+I'm not recommending it but it does work.
+
 ```elixir
 defmodule HelloWorld do
   import Plug.Conn
