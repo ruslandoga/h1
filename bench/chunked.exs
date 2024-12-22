@@ -20,6 +20,7 @@ defmodule Bench do
   end
 
   def imperative(socket, chunks) do
+    Process.put(__MODULE__, :sent)
     Enum.each(chunks, fn chunk -> :gen_tcp.send(socket, chunk) end)
   end
 
