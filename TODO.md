@@ -7,3 +7,4 @@
 - replace PicoHTTPParser with pure Elixir impl
 - URL parsing
 - submit to https://github.com/TechEmpower/FrameworkBenchmarks 
+- telemetry

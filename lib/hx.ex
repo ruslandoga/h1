@@ -1,7 +1,6 @@
 defmodule Hx do
   @moduledoc "A minimal HTTP/1 server."
   use GenServer
-  require Logger
   require Record
   Record.defrecordp(:timeouts, [:accept, :request, :headers])
   Record.defrecordp(:state, [:socket, :acceptors, :timeouts, :handler])
@@ -69,7 +68,9 @@ defmodule Hx do
 
   @impl true
   def handle_info({:EXIT, _pid, {:error, :emfile = reason}}, state) do
-    Logger.error("Hx could not accept connection: too many open files. Shutting down.")
+    # TODO
+    # Logger.error("Hx could not accept connection: too many open files. Shutting down.")
+    :telemetry.execute([:hx, :server, :error], %{}, %{pid: self(), reason: reason})
     {:stop, reason, state}
   end
 
@@ -80,7 +81,8 @@ defmodule Hx do
 
   def handle_info({:EXIT, pid, reason}, state) do
     # TODO
-    Logger.error("Hx acceptor (pid #{inspect(pid)}) crashed:\n" <> Exception.format_exit(reason))
+    # Logger.error("Hx acceptor (pid #{inspect(pid)}) crashed:\n" <> Exception.format_exit(reason))
+    :telemetry.execute([:hx, :acceptor, :error], %{}, %{pid: pid, reason: reason})
     remove_acceptor(state, pid)
     {:noreply, state}
   end
@@ -193,10 +195,6 @@ defmodule Hx do
     end
   end
 
-  defp parse_request("GET / HTTP/1.1\r\nhost: localhost:60212\r\nuser-agent: mint/1.6.2\r\n\r\n") do
-    {"GET", "/", 1, [{"host", "localhost:60212"}, {"user-agent", "mint/1.6.2"}], ""}
-  end
-
   defp recv_request(socket, _buffer, _timeout) do
     send_bad_request(socket)
     :socket.close(socket)
@@ -205,6 +203,10 @@ defmodule Hx do
 
   defp send_bad_request(socket) do
     :socket.send(socket, "HTTP/1.1 400 Bad Request\r\ncontent-length: 11\r\n\r\nBad Request")
+  end
+
+  defp parse_request("GET / HTTP/1.1\r\nhost: localhost:60212\r\nuser-agent: mint/1.6.2\r\n\r\n") do
+    {"GET", "/", 1, [{"host", "localhost:60212"}, {"user-agent", "mint/1.6.2"}], ""}
   end
 
   defp process_headers(headers) do
