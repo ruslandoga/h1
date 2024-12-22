@@ -1,10 +1,14 @@
 - Date headers
+- headers as maps
+- handler opts
+- no trap exit
 - WebSocket
 - chunked requests
 - chunked responses
-- file serving
-- TLS
+- file serving (kTLS?)
+- TLS (kTLS?)
 - replace PicoHTTPParser with pure Elixir impl
-- URL parsing
+- URL parsing (Ada?)
 - submit to https://github.com/TechEmpower/FrameworkBenchmarks 
 - telemetry
+- historical benchmarks

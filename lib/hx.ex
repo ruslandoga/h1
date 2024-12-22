@@ -22,7 +22,12 @@ defmodule Hx do
 
   @impl true
   def init(opts) do
+    # TODO remove
     Process.flag(:trap_exit, true)
+
+    # TODO
+    # :telemetry.execute([:hx, :server, :start], %{}, %{pid: self()})
+    # etc.
 
     handler = Keyword.fetch!(opts, :handler)
     addr = Keyword.get(opts, :addr, {127, 0, 0, 1})
@@ -93,7 +98,13 @@ defmodule Hx do
 
   defp start_acceptor(state) do
     state(socket: socket, acceptors: acceptors, timeouts: timeouts, handler: handler) = state
+
     pid = :proc_lib.spawn_link(__MODULE__, :accept, [self(), socket, timeouts, handler])
+
+    # TODO
+    # pid =
+    #   :proc_lib.spawn_opt(__MODULE__, :accept, [self(), socket, timeouts, handler], [:monitor])
+
     :ets.insert(acceptors, {pid})
   end
 
