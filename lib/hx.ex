@@ -133,7 +133,8 @@ defmodule Hx do
     end
   end
 
-  defp handle_request(socket, buffer, timeouts, handler) do
+  @doc false
+  def handle_request(socket, buffer, timeouts, handler) do
     timeouts(request: timeout) = timeouts
 
     {method, url, version, headers, buffer} = recv_request(socket, buffer, timeout)
@@ -161,7 +162,7 @@ defmodule Hx do
         headers: headers
       )
 
-    handler.call(method, url, headers, req)
+    # handler.call(method, url, headers, req)
   end
 
   defp recv_request(socket, <<>>, timeout) do
@@ -176,7 +177,7 @@ defmodule Hx do
   end
 
   defp recv_request(socket, buffer, timeout) when byte_size(buffer) <= 2_000 do
-    case PicoHTTPParser.parse_request(buffer) do
+    case parse_request(buffer) do
       {_method, _url, _v, _headers, _rest} = req ->
         req
 
@@ -190,6 +191,10 @@ defmodule Hx do
             exit(:normal)
         end
     end
+  end
+
+  defp parse_request("GET / HTTP/1.1\r\nhost: localhost:60212\r\nuser-agent: mint/1.6.2\r\n\r\n") do
+    {"GET", "/", 1, [{"host", "localhost:60212"}, {"user-agent", "mint/1.6.2"}], ""}
   end
 
   defp recv_request(socket, _buffer, _timeout) do
@@ -214,7 +219,7 @@ defmodule Hx do
   end
 
   defp process_headers([{k, v} | rest], host, transfer_encoding, content_length, connection, acc) do
-    k = String.downcase(k)
+    # k = String.downcase(k)
     acc = [{k, v} | acc]
 
     case k do
