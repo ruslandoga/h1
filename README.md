@@ -70,3 +70,5 @@ Running 10s test @ http://localhost:8000
 Requests/sec: 192597.57
 Transfer/sec:     14.33MB
 ```
+
+Let's talk after it's 250k+
